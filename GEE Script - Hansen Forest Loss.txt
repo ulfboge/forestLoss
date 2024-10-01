@@ -1,0 +1,126 @@
+// https://code.earthengine.google.com/3ff567c04e0079b78a2d42a1e69a8667
+
+// Load Hansen et al. Global Forest Change dataset
+var forestChange = ee.Image('UMD/hansen/global_forest_change_2023_v1_11');
+
+// Load the region of interest (ROI)
+var roi = ee.FeatureCollection('projects/ee-gdifnr2/assets/openForests/project-area');
+
+// Load the palettes package
+var palettes = require('users/gena/packages:palettes');
+
+// Define forest cover threshold (10%)
+var forestCoverThreshold = 10;
+
+// Select the forest cover image and apply the threshold
+var forestCover = forestChange.select(['treecover2000']).gte(forestCoverThreshold).clip(roi);
+
+// Calculate the area of the region of interest
+var roiArea = roi.geometry().area().divide(10000); // in hectares
+
+// Calculate the forest cover area
+var forestCoverArea = forestCover.multiply(ee.Image.pixelArea()).divide(10000)
+  .reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: roi,
+    scale: 30,
+    maxPixels: 1e9
+  }).get('treecover2000');
+
+// Calculate annual forest loss
+var annualLoss = forestChange.select('lossyear').clip(roi).selfMask();
+var years = ee.List.sequence(1, 21); // 2001 to 2021
+
+// Define a color palette for the loss years
+var lossYearPalette = palettes.colorbrewer.RdYlGn[11];  // Example palette
+
+// Calculate the deforested area of each pixel in square meters for masked layer
+var pixelArea = ee.Image.pixelArea();
+
+// Calculate the loss area for each year by multiplying the lossyear mask by the pixel area
+var lossAreaByYear = pixelArea.multiply(annualLoss.gt(0));
+
+// Group the loss per year
+var lossByYear = lossAreaByYear.addBands(annualLoss).reduceRegion({
+  reducer: ee.Reducer.sum().group({
+    groupField: 1
+  }),
+  geometry: roi,
+  scale: 30,
+  maxPixels: 1e9
+});
+
+// Post-process the results
+var statsFormatted = ee.List(lossByYear.get('groups'))
+  .map(function(el) {
+    var d = ee.Dictionary(el);
+    // Convert area from square meters to hectares
+    var areaHectares = ee.Number(d.get('sum')).divide(10000); // Convert to hectares
+    return [ee.Number(d.get('group')).add(2000).format('%d'), areaHectares];
+  });
+var statsDictionary = ee.Dictionary(statsFormatted.flatten());
+
+// Calculate the total forest loss by summing up the areas for each year
+var totalLossHectares = ee.List(statsFormatted.map(function(el) {
+  return ee.List(el).get(1); // Get the area in hectares for each year
+})).reduce(ee.Reducer.sum()); // Sum up all the areas
+
+// Print results to the console
+print('Area of ROI (in hectares):', roiArea.round().format('%,d'));
+print('Forest cover area (in hectares):', ee.Number(forestCoverArea).round().format('%,d'));
+print('Total Forest Loss 2001-2021 (in hectares, rounded):', ee.Number(totalLossHectares).round().format('%,d'));
+print('Annual Forest Loss (in hectares):', statsDictionary);
+
+// Create a bar chart of annual forest loss
+var annualLossCollection = ee.FeatureCollection(statsFormatted.map(function(el) {
+  var year = ee.Number(ee.List(el).get(0));
+  var loss = ee.Number(ee.List(el).get(1));
+  return ee.Feature(null, {year: year, loss: loss});
+}));
+
+var chart = ui.Chart.feature.byFeature(annualLossCollection, 'year', 'loss')
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Annual Forest Loss (hectares)',
+    hAxis: {title: 'Year'},
+    vAxis: {title: 'Forest Loss (hectares)'},
+    legend: {position: 'none'}
+  });
+
+print(chart);
+
+// Add forest cover layer to the map
+Map.addLayer(forestCover.updateMask(forestCover), {palette: ['00FF00'], min: 1, max: 1}, 'Forest Cover');
+
+// Add annual forest loss layer to the map with year-specific colors
+var lossYearVis = {
+  min: 1,
+  max: 21,
+  palette: lossYearPalette
+};
+Map.addLayer(annualLoss.updateMask(annualLoss), lossYearVis, 'Annual Forest Loss');
+
+// Center the map on the area of interest
+Map.centerObject(roi, 10);
+
+// Export forest cover image to Google Drive
+Export.image.toDrive({
+  image: forestCover,
+  description: 'Forest_Cover',
+  folder: 'earthengine',
+  fileNamePrefix: 'forest_cover',
+  region: roi,
+  scale: 30,
+  maxPixels: 1e9
+});
+
+// Export annual forest loss image to Google Drive
+Export.image.toDrive({
+  image: annualLoss,
+  description: 'Annual_Forest_Loss',
+  folder: 'earthengine',
+  fileNamePrefix: 'annual_forest_loss',
+  region: roi,
+  scale: 30,
+  maxPixels: 1e9
+});
